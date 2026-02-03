@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 import Phaser from "phaser";
 
 export default class MainScene extends Phaser.Scene {
@@ -11,6 +12,7 @@ export default class MainScene extends Phaser.Scene {
         this.load.image("ground", "/ground.png");
         this.load.image("obstacle", "/obstacle.png");
         this.load.image("gift", "/gift.png");
+        this.load.image("energy", "/energy.png");
 
         this.load.audio("music", "/sounds/chase_music.mp3");
         this.load.audio("jump", "/sounds/jump.mp3");
@@ -19,15 +21,19 @@ export default class MainScene extends Phaser.Scene {
     }
 
     create() {
-        /* ---------- GAME STATE ---------- */
+        /* ---------- STATE ---------- */
         this.gameStarted = false;
         this.isGameOver = false;
+        this.hitCooldown = false;
 
         /* ---------- CONSTANTS ---------- */
-        this.speed = 4;
+        this.baseSpeed = 4;
+        this.speed = this.baseSpeed;
+        this.energy = 100;
+
+        this.worldHeight = 400;
         this.groundHeight = 48;
-        this.groundY = 400 - this.groundHeight;
-        this.score = 0;
+        this.groundY = this.worldHeight - this.groundHeight;
 
         this.physics.world.gravity.y = 900;
 
@@ -39,9 +45,16 @@ export default class MainScene extends Phaser.Scene {
             })
             .setOrigin(0.5);
 
+        this.score = 0;
         this.scoreText = this.add.text(16, 16, "Score: 0", {
             fontSize: "18px",
             fill: "#ffffff",
+        });
+
+        this.energyText = this.add.text(16, 40, "Energy: 100%", {
+            fontSize: "18px",
+            fill: "#00ff99",
+            fontStyle: "bold",
         });
 
         this.gameOverText = this.add
@@ -60,43 +73,50 @@ export default class MainScene extends Phaser.Scene {
         this.ground2.refreshBody();
 
         /* ---------- PLAYER ---------- */
-        this.player = this.physics.add.sprite(
-            200,
-            this.groundY - this.playerHeightOffset(),
-            "player"
-        );
+        this.player = this.physics.add.sprite(200, 0, "player");
         this.player.setCollideWorldBounds(true);
         this.player.body.enable = false;
 
+        // ⬆️ keep player ~25px above ground visually
+        this.player.y =
+            this.groundY - this.player.displayHeight / 3 - 40;
+
+        this.player.setVelocity(0, 0);
+
         /* ---------- ENEMY ---------- */
-        this.enemy = this.physics.add.sprite(80, this.groundY, "enemy");
+        this.enemy = this.physics.add.sprite(80, 0, "enemy");
         this.enemy.body.allowGravity = false;
         this.enemy.setImmovable(true);
 
-        this.enemyDistance = 140;
-        this.enemyCatchSpeed = 0.02;
+        this.enemy.y =
+            this.groundY - this.enemy.displayHeight / 2;
 
-        // Enemy jump simulation
-        this.enemyVelocityY = 0;
+        // enemy jump simulation
+        this.enemyVelY = 0;
         this.enemyJumpForce = -350;
         this.enemyGravity = 900;
 
         /* ---------- GROUPS ---------- */
         this.obstacles = this.physics.add.group();
         this.gifts = this.physics.add.group();
+        this.energyGifts = this.physics.add.group();
 
         /* ---------- COLLISIONS ---------- */
         this.physics.add.collider(this.player, this.grounds);
 
-        this.physics.add.collider(this.player, this.obstacles, () => {
-            this.enemyDistance -= 30;
-            if (this.enemyDistance < 50) this.enemyDistance = 50;
-        });
+        this.physics.add.collider(
+            this.player,
+            this.obstacles,
+            this.handleObstacleHit,
+            null,
+            this
+        );
 
+        this.physics.add.overlap(this.player, this.gifts, this.collectGift, null, this);
         this.physics.add.overlap(
             this.player,
-            this.gifts,
-            this.collectGift,
+            this.energyGifts,
+            this.collectEnergy,
             null,
             this
         );
@@ -107,8 +127,6 @@ export default class MainScene extends Phaser.Scene {
         );
 
         this.input.keyboard.on("keydown-SPACE", this.jump, this);
-        this.input.on("pointerdown", this.jump, this);
-
         this.input.once("pointerdown", () => {
             if (!this.gameStarted) this.startGame();
         });
@@ -135,10 +153,14 @@ export default class MainScene extends Phaser.Scene {
             callback: this.spawnGift,
             callbackScope: this,
         });
-    }
 
-    playerHeightOffset() {
-        return this.player?.height ? this.player.height * 0.5 : 40;
+        this.energyTimer = this.time.addEvent({
+            delay: 6000,
+            loop: true,
+            paused: true,
+            callback: this.spawnEnergyGift,
+            callbackScope: this,
+        });
     }
 
     startGame() {
@@ -146,8 +168,11 @@ export default class MainScene extends Phaser.Scene {
         this.startText.setVisible(false);
 
         this.player.body.enable = true;
+        this.player.setVelocity(0, 0);
+
         this.obstacleTimer.paused = false;
         this.giftTimer.paused = false;
+        this.energyTimer.paused = false;
 
         this.music.play();
         this.runSound.play();
@@ -164,18 +189,60 @@ export default class MainScene extends Phaser.Scene {
         }
     }
 
+    handleObstacleHit(player, obstacle) {
+        if (this.isGameOver) return;
+
+        // FRONT HIT → GAME OVER
+        if (player.body.blocked.right || player.body.touching.right) {
+            this.handleGameOver();
+            return;
+        }
+
+        // FALLING ON TOP / CORNER → ENERGY LOSS
+        if (player.body.velocity.y > 0 && !this.hitCooldown) {
+            this.hitCooldown = true;
+            this.modifyEnergy(-20);
+
+            this.time.delayedCall(600, () => {
+                this.hitCooldown = false;
+            });
+        }
+    }
+
     spawnObstacle() {
-        const obs = this.obstacles.create(850, this.groundY, "obstacle");
+        const obs = this.obstacles.create(
+            850,
+            this.groundY,
+            "obstacle"
+        );
         obs.setOrigin(0.5, 1);
         obs.body.allowGravity = false;
+        obs.setImmovable(true); // ❗ NEVER FALL
         obs.setVelocityX(-this.speed * 60);
-        obs.setImmovable(true);
     }
 
     spawnGift() {
-        const gift = this.gifts.create(850, this.groundY - 80, "gift");
+        const gift = this.gifts.create(
+            850,
+            this.groundY - 80,
+            "gift"
+        );
         gift.body.allowGravity = false;
         gift.setVelocityX(-this.speed * 60);
+    }
+
+    spawnEnergyGift() {
+        const values = [5, 10, 20];
+        const value = Phaser.Utils.Array.GetRandom(values);
+
+        const energy = this.energyGifts.create(
+            850,
+            this.groundY - 120,
+            "energy"
+        );
+        energy.body.allowGravity = false;
+        energy.setVelocityX(-this.speed * 60);
+        energy.energyValue = value;
     }
 
     collectGift(player, gift) {
@@ -184,7 +251,30 @@ export default class MainScene extends Phaser.Scene {
         this.scoreText.setText(`Score: ${this.score}`);
     }
 
+    collectEnergy(player, energy) {
+        energy.destroy();
+        this.modifyEnergy(energy.energyValue);
+
+        this.speed += 0.4;
+        this.time.delayedCall(1500, () => {
+            this.speed = this.baseSpeed + this.energy / 100;
+        });
+    }
+
+    modifyEnergy(amount) {
+        this.energy = Phaser.Math.Clamp(this.energy + amount, 0, 100);
+        this.energyText.setText(`Energy: ${this.energy}%`);
+
+        this.energyText.setScale(1.25);
+        this.time.delayedCall(200, () => this.energyText.setScale(1));
+    }
+
     update() {
+        // START VIA ENTER
+        if (!this.gameStarted && Phaser.Input.Keyboard.JustDown(this.enterKey)) {
+            this.startGame();
+        }
+
         if (!this.gameStarted || this.isGameOver) return;
 
         /* ---------- MOVE GROUND ---------- */
@@ -205,40 +295,40 @@ export default class MainScene extends Phaser.Scene {
         this.obstacles.children.iterate((obs) => {
             if (!obs) return;
 
-            const distance = obs.x - this.enemy.x;
-            if (distance > 0 && distance < 80 && this.enemyVelocityY === 0) {
-                this.enemyVelocityY = this.enemyJumpForce;
+            const dist = obs.x - this.enemy.x;
+            if (dist > 0 && dist < 90 && this.enemyVelY === 0) {
+                this.enemyVelY = this.enemyJumpForce;
             }
         });
 
-        // Simulate enemy jump
-        this.enemyVelocityY += this.enemyGravity * 0.016;
-        this.enemy.y += this.enemyVelocityY * 0.016;
+        this.enemyVelY += this.enemyGravity * 0.016;
+        this.enemy.y += this.enemyVelY * 0.016;
 
-        if (this.enemy.y >= this.groundY) {
-            this.enemy.y = this.groundY;
-            this.enemyVelocityY = 0;
+        if (this.enemy.y >= this.groundY - this.enemy.displayHeight / 2) {
+            this.enemy.y = this.groundY - this.enemy.displayHeight / 2;
+            this.enemyVelY = 0;
         }
 
-        /* ---------- CLEAN OBJECTS ---------- */
+        /* ---------- CLEAN ---------- */
         this.obstacles.children.iterate((o) => o && o.x < -50 && o.destroy());
         this.gifts.children.iterate((g) => g && g.x < -50 && g.destroy());
+        this.energyGifts.children.iterate((e) => e && e.x < -50 && e.destroy());
 
-        /* ---------- ENEMY CHASE ---------- */
-        const targetX = this.player.x - this.enemyDistance;
+        /* ---------- ENEMY CATCH ---------- */
+        const danger = 1 - this.energy / 100;
         this.enemy.x = Phaser.Math.Linear(
             this.enemy.x,
-            targetX,
-            this.enemyCatchSpeed
+            this.player.x - (90 + danger * 160),
+            0.05
         );
 
-        /* ---------- GAME OVER ---------- */
-        if (this.enemy.x + this.enemy.width * 0.5 >= this.player.x) {
+        if (this.energy <= 0 && this.enemy.x >= this.player.x - 10) {
             this.handleGameOver();
         }
     }
 
     handleGameOver() {
+        if (this.isGameOver) return;
         this.isGameOver = true;
 
         this.music.stop();
